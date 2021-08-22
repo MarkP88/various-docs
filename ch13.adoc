@@ -1,0 +1,1051 @@
+= Garbage Collection
+:author: Iuliana Cosmina
+:email: iuliana.cosmina@gmail.com
+:source-highlighter: coderay
+:coderay-linenums-mode: inline
+:imagesdir: images/chapter13
+:icons: font
+
+When executing Java code, objects are created, used and discarded repeatedly from memory. The process through
+which unused Java objects are discarded is called *memory management*, but is most commonly known as *garbage
+collection(GC)*. Garbage collection was mentioned in *Chapter 5: Data Types* as it was needed for explaining the difference between primitive and reference types, but in this chapter we will go deep into the _under the hood_ of the JVM to resolve yet another mystery of a running Java application.
+
+When the Java Garbage Collector does its job properly, the memory is cleaned up, before new objects are created and it does not fill up, so you could say that the memory allocated to a program is _recycled_. Programs of low complexity, like the ones we’ve been writing so far do not require that much memory to function, but depending on their design (remember recursivity ?) they could end up using more memory than available. In Java, the Garbage collector runs automatically. In more low level languages, like C there is no automatic memory management, and the developer is responsible for writing the code to allocate memory as needed, and deallocate it when it is no longer needed. Although it seems practical to have automatic memory management, the Garbage Collector can be a problem if managed incorrectly. This chapter provides enough information about the Garbage Collector, to ensure it is used wisely and when problems arise at least you will have a good place to start fixing them.
+
+Although some ways to tune the Garbage Collector will be introduced, just keep in mind that Garbage Collection
+tuning should not be necessary, a program should be written in such a way that creates only objects that are needed to perform its function and references are managed correctly, estimations should be done before the application is put into production and the maximum amount of memory needed by it should be known and configured before that. If the memory allocated to a Java program is not enough, there is usually something rotten in the implementation.
+
+== Garbage Collection Basics
+
+The Java automatic garbage collection is one of the major features of the of the Java Programming language. The JVM is a virtual machine used to execute Java programs. As the Java programs uses resources of the system the JVM is running on top of, it has to have a way to release those resources safely. This job is done by the Garbage Collector. +
+
+To understand what is the place of the Garbage Collector we have to take a look at the JVM architecture.
+
+=== Oracle Hotspot JVM architecture
+
+Over the years some big companies have produced their own variations of the JVM(eg: IBM) and now that Java is
+moving into the module age and the rapid delivery style, more and more companies will appear that maintain a specific version of the JDK/JVM(eg. Azul, Amazon Coretto, GraalVM), because migration to 9+ is difficult for big applications with legacy dependencies.
+
+Also, another important economic factor here is that Java is Paid Software as of 01/01/2019 and companies will have to pay for the JDK running their Java based software. The official Oracle JDK can be used on personal computers by developers learning to code, or building small projects, but running their software on a server, accessing enterprise features such as full-fledged JMC and turning that software profitable requires a paid subscription.
+
+Currently, the Oracle’s HotSpot is still the most common JVM being used by many applications. When it comes to garbage collection, this JVM provides a mature set of garbage collection options. An abstract representation of its architecture is depicted in Figure 13-1.
+
+image:Figure_13-01.png[Scanner, 600]
+
+*Figure 13-1.* _Oracle HotSpot JVM Architecture (abstract representation)._
+
+The *heap* memory area is managed by the garbage collector, and is split into multiple zones. Objects are moved between these zones until being discarded. The zones depicted in Figure 13-2 are for old-styles garbage collectors and the new style of garbage collector, that will probably follow the model of the current default garbage collector used by the JDK, the G1GC, introduced in JDK 8.
+
+image:Figure_13-02.png[Scanner, 600]
+
+*Figure 13-2.* _The heap structure._
+
+The G1GC is a next generation garbage collector, designed for machines with a lot of resources, that is why its approach to the partitioning of the heap is different. Its heap is partitioned into a set of equal-sized heap regions, each a contiguous range of virtual memory. Certain region sets are assigned the same roles (eden, survivor, old) as in the older collectors, but there is not a fixed size for them. This provides greater flexibility in memory usage. You can read more about the different types of garbage collectors in the next section, for now the focus will remain on the heap memory and its zones that are named *generations*.
+
+When an application is running, objects created by it are stored in the *young generation area*. When an object is created it starts its life in a subdivision of this generation named the *eden space*. When the eden space is filled, this triggers a *minor garbage collection(minor GC run)* that cleans up this area of unreferenced objects, and moves referenced objects to the *first survivor space (S0)*. The next time the eden space is filled, another minor GC run is triggered, which again deletes unreferenced objects, and referenced objects are moved to the *next survivor space (S1)*. +
+The objects in S0 have been there for a minor GC run, so their age is incremented. They are moved to S1 as well, so S0 and the eden can be cleaned up.  +
+At the next minor GC run, the operation is performed again, but this time referenced objects are saved into the empty S0. The older objects from S1 have their age incremented and moved to S0 as well, so the S1 and eden can be cleaned up. +
+After the objects in survivor space reach a certain age, they are moved to *the old generation space* during minor GC runs.
+
+The previously described steps are depicted in image 13-3, and the objects `o1` and `o2` are aged until they are moved to the old
+generation area.
+
+image:Figure_13-03.png[Scanner, 600]
+
+*Figure 13-3.* _Minor GC runs on the Young Generation space._
+
+Minor GC collections will happen until the old generation space is filled. That is when a *major garbage collection( major GC run)* is triggered, that will delete unreferenced objects and will compact the memory, moving objects around, so that the empty memory left is one big compact space. +
+*The minor garbage collection event is a stop the world event*. This process basically takes over the run of the application and pauses its execution, so it can free the memory. As the young generation space is quite small in size(as you will see this in the next section), the application pause is usually negligible. If no memory can be reclaimed from the young generation area after a minor GC run takes place, a major GC run is triggered.
+
+The *permanent generation* area is reserved for JVM metadata such as classes and methods. This area is cleaned too from time to time to remove classes that are no longer used in the application. The cleanup of this area is triggered when there are no more objects in the heap.
+
+The garbage collection process described above is specific to generational garbage collectors, such as the G1GC. Before JDK 8, garbage collection was done using an older garbage collector that uses an algorithm called *Concurrent Mark Sweep*. This type of garbage collector runs in parallel with the application marking used and unused zones of memory. Then it would delete unreferenced object and would compact the memory into a contiguous zone, by moving objects around. This process was quite inefficient and time-consuming. As more and more objects were created, the garbage collection took more and more time to be performed, but as most objects are quite short-lived this was not really a problem. So the CMS garbage collector was ok for a while. +
+
+The G1GC has a similar approach, but after the mark phase is finished, G1 focuses on regions that are mostly empty to recover as much unused memory as possible. That is why this garbage collector is also named *garbage-first*. G1 also uses a pause prediction model to decide how many memory regions can be processed based on the pause time set for the application. Objects from the processed region are copied to a single region of the heap, thus realising a memory compaction at the same time. Also G1GC does not have a fixed size the eden and survivor spaces, it decides their size after every minor GC run.
+
+=== How Many Garbage Collectors Are There?
+
+The Garbage Collectors the Oracle HotSpot JVM provides the following types of garbage collectors:
+
+* *the serial collector*: all garbage collection events are conducted serially in one thread. Memory compaction happens after each garbage collection.
+* *the parallel collector*: multiple threads are used for minor garbage collection. A single thread is used for a major garbage collection and Old Generation compaction.
+* *CMS (Concurrent Mark Sweep)*: multiple threads are used for minor garbage collection using the same algorithm as the parallel GC. Major garbage collection is multi-threaded as well, but CMS runs concurrently alongside application processes to minimise stop the world events. No memory compaction is done. This type of garbage collector is suitable for or applications requiring shorter garbage collection pauses and that can afford to share processor resources with the garbage collector while the application is running. This was the default garbage collector until Java 8, when G1 was introduced as default.
+* *G1 (Garbage First)*: introduced in Oracle JDK 7, update 4, was designed to permanently replace the CMS GC and is suitable for applications that can operate concurrently with CMS collector, that need memory compaction, that need more predictable GC pause durations and do not require a much larger heap. The Garbage-First (G1) collector is a server-style garbage collector, targeted for multi-processor machines with large memories, but considering that most laptops now have at least 8 cores and 16GB RAM it is quite suitable for them as well. G1 has both concurrent (runs along with application threads, e.g., refinement, marking, cleanup) and parallel (multi-threaded, e.g., stop the world) phases. Full garbage collections are still single threaded, but if tuned properly your applications should avoid full garbage collections.
+* *Z Garbage Collector* : the Z Garbage Collector (ZGC) is a scalable low latency garbage collector introduced in Java 11. ZGC performs all expensive work concurrently, without stopping the execution of application threads for more than 10ms, which makes is suitable for applications which require low latency and/or use a very large heap (multi-terabytes)
+* *Shenandoah Garbage Collector* : Shenandoah is the low pause time garbage collector, introduced in Java 12, that reduces GC pause times by performing more garbage collection work concurrently with the running Java program. Shenandoah does the bulk of GC work concurrently, including the concurrent compaction, which means its pause times are no longer directly proportional to the size of the heap.
+* *Epsilon no-op collector*: introduced in Java 11, this type of collector is actually a dummy GC, that does not recycle or clean up the memory. When the heap is full, the JVM just shuts down. This type of collector can be used for performance tests, for memory allocation analysis, VM interface testing and extremely short-lived jobs and applications that are super-limited when it comes to memory usage and developers must estimate the application memory footprint as exactly as possible.
+
+IMPORTANT: The Concurrent Mark Sweep Garbage Collector has been removed from the JDK, and the `-XX:+UseConcMarkSweepGC` VM option is no longer recognized.
+
+Ok, we’ve listed the garbage collector types but how do we know which is the one used by our local JVM? There is more than one way. The most simple way is to add the `-verbose:gc` as a VM option when running a simple class with a `main(..)` method. +
+Using Java 17 JDK, without any other configuration the following output is shown:
+```
+[0.011s][info][gc] Using G1
+```
+It becomes clear that by default, the G1 garbage collector is used. To show even more details of this garbage collector the `-Xlog:gc*` footnote:[This VM option replaced the deprecated -XX:+PrintGCDetails] can be added to the VM arguments when running a Java class. For the simple class `com.apress.bgn.thirteen.ShowGCDemo` that contains only a `System.out.println` statement, the output shown in Listing 13-1 is printed in the console.
+
+*Listing 13-1.*  Showing G1GC details using `-Xlog:gc*` when running `ShowGCDemo`.
+[source, , linenums]
+----
+[0.010s][info][gc] Using G1
+[0.012s][info][gc,init] Version: 17+35-2724 (release)
+[0.012s][info][gc,init] CPUs: 8 total, 8 available
+[0.012s][info][gc,init] Memory: 16384M
+[0.012s][info][gc,init] Large Page Support: Disabled
+[0.012s][info][gc,init] NUMA Support: Disabled
+[0.012s][info][gc,init] Compressed Oops: Enabled (Zero based)
+[0.012s][info][gc,init] Heap Region Size: 2M <1>
+[0.012s][info][gc,init] Heap Min Capacity: 8M
+[0.012s][info][gc,init] Heap Initial Capacity: 256M
+[0.012s][info][gc,init] Heap Max Capacity: 4G <2>
+[0.012s][info][gc,init] Pre-touch: Disabled
+[0.012s][info][gc,init] Parallel Workers: 8
+[0.012s][info][gc,init] Concurrent Workers: 2
+[0.012s][info][gc,init] Concurrent Refinement Workers: 8
+[0.012s][info][gc,init] Periodic GC: Disabled <3>
+[0.012s][info][gc,metaspace] CDS archive(s) mapped at: [0x0000000800000000-0x0000000800bd0000-0x0000000800bd0000), size 12386304, SharedBaseAddress: 0x0000000800000000, ArchiveRelocationMode: 0.
+[0.012s][info][gc,metaspace] Compressed class space mapped at: 0x0000000800c00000-0x0000000840c00000, reserved size: 1073741824
+[0.012s][info][gc,metaspace] Narrow klass base: 0x0000000800000000, Narrow klass shift: 0, Narrow klass range: 0x100000000
+Hey ma' look the GC!
+[0.123s][info][gc,heap,exit] Heap
+[0.123s][info][gc,heap,exit]  garbage-first heap   total 266240K, used 6098K [0x0000000700000000, 0x0000000800000000) <4>
+[0.123s][info][gc,heap,exit]   region size 2048K, 3 young (6144K), 0 survivors (0K)
+[0.123s][info][gc,heap,exit]  Metaspace       used 397K, committed 576K, reserved 1056768K
+[0.123s][info][gc,heap,exit]   class space    used 20K, committed 128K, reserved 1048576K
+----
+<1> make bold
+<2> make bold
+<3> make bold
+<4> make bold "garbage-first heap"
+
+As you can see, now we can see the heap maximum size(4G), the memory region size (2M), size and occupation for each generation.
+
+In *Chapter 5: Data Types*, the `java -XX:+PrintFlagsFinal -version` command was introduced to show all JVM flags. Filtering the results returned by the "GC" and "NewSize"  shows all the  GC specific flags and their values. There are quite a few of them, and they are shown in Listing 13-2.
+
+*Listing 13-2.*  Showing G1GC flags using `java -XX:+PrintFlagsFinal -version | grep 'GC\|NewSize'`.
+[source, , linenums]
+----
+$ java -XX:+PrintFlagsFinal -version | grep 'GC\|NewSize'
+    uintx AdaptiveSizeMajorGCDecayTimeScale   = 10           {product} {default}
+     uint ConcGCThreads                       = 2            {product} {ergonomic}
+     bool DisableExplicitGC                   = false        {product} {default}
+     bool ExplicitGCInvokesConcurrent         = false        {product} {default}
+    uintx G1MixedGCCountTarget                = 8            {product} {default}
+    uintx G1PeriodicGCInterval                = 0            {manageable} {default}
+     bool G1PeriodicGCInvokesConcurrent       = true         {product} {default}
+   double G1PeriodicGCSystemLoadThreshold     = 0.000000     {manageable} {default}
+    uintx GCDrainStackTargetSize              = 64           {product} {ergonomic}
+    uintx GCHeapFreeLimit                     = 2            {product} {default}
+    uintx GCLockerEdenExpansionPercent        = 5            {product} {default}
+    uintx GCPauseIntervalMillis               = 201          {product} {default}
+    uintx GCTimeLimit                         = 98           {product} {default}
+    uintx GCTimeRatio                         = 12           {product} {default}
+     bool HeapDumpAfterFullGC                 = false        {manageable} {default}
+     bool HeapDumpBeforeFullGC                = false        {manageable} {default}
+   size_t HeapSizePerGCThread                 = 43620760     {product} {default}
+    uintx MaxGCMinorPauseMillis               = 18446744..   {product} {default}
+    uintx MaxGCPauseMillis                    = 200          {product} {default}
+   size_t MaxNewSize                          = 2575302656   {product} {ergonomic}
+   size_t NewSize                             = 1363144      {product} {default} <1>
+   size_t NewSizeThreadIncrease               = 5320         {pd product} {default}
+      int ParGCArrayScanChunk                 = 50           {product} {default}
+    uintx ParallelGCBufferWastePct            = 10           {product} {default}
+     uint ParallelGCThreads                   = 8            {product} {default}
+     bool PrintGC                             = false        {product} {default}
+     bool PrintGCDetails                      = false        {product} {default}
+     bool ScavengeBeforeFullGC                = false        {product} {default}
+     bool UseAdaptiveSizeDecayMajorGCCost     = true         {product} {default}
+     bool UseAdaptiveSizePolicyWithSystemGC   = false        {product} {default}
+     bool UseDynamicNumberOfGCThreads         = true         {product} {default}
+     bool UseG1GC                             = true         {product} {ergonomic} <2>
+     bool UseGCOverheadLimit                  = true         {product} {default}
+     bool UseMaximumCompactionOnSystemGC      = true         {product} {default}
+     bool UseParallelGC                       = false        {product} {default}
+     bool UseSerialGC                         = false        {product} {default}
+     bool UseShenandoahGC                     = false        {product} {default}
+     bool UseZGC                              = false        {product} {default}
+----
+<1> make bold
+<2> make bold
+
+The `UseG1GC` is set to true by default, which means when the JVM is used to execute a Java application the G1 garbage collector is used. The "NewSize" filter picks up flags with values relevant for the Young Generation size. +
+All these flags can be used as VM options preceedded by `-XX:+` when running an application to customize the GC behaviour or show extra details in the logs. +
+For example, we can instruct the JVM to use any of the garbage collectors listed previously, by using their specific VM options:
+
+* `-XX:+UseSerialGC` to use the serial GC, in this case adding `-verbose:gc -Xlog:gc*` as VM option as well produces the output in Listing 13-3.(Notice the lack of parallel, concurrent workers and the different heap structure.)
+
+*Listing 13-3.*  Showing Serial GC details.
+[source, , linenums]
+----
+[0.013s][info][gc] Using Serial <1>
+[0.013s][info][gc,init] Version: 17+35-2724 (release)
+[0.013s][info][gc,init] CPUs: 8 total, 8 available
+[0.013s][info][gc,init] Memory: 16384M
+[0.013s][info][gc,init] Large Page Support: Disabled
+[0.013s][info][gc,init] NUMA Support: Disabled
+[0.013s][info][gc,init] Compressed Oops: Enabled (Zero based)
+[0.013s][info][gc,init] Heap Min Capacity: 8M
+[0.013s][info][gc,init] Heap Initial Capacity: 256M
+[0.013s][info][gc,init] Heap Max Capacity: 4G
+[0.013s][info][gc,init] Pre-touch: Disabled
+[0.014s][info][gc,metaspace] CDS archive(s) mapped at: [0x0000000800000000-0x0000000800bd0000-0x0000000800bd0000), size 12386304, SharedBaseAddress: 0x0000000800000000, ArchiveRelocationMode: 0.
+[0.014s][info][gc,metaspace] Compressed class space mapped at: 0x0000000800c00000-0x0000000840c00000, reserved size: 1073741824
+[0.014s][info][gc,metaspace] Narrow klass base: 0x0000000800000000, Narrow klass shift: 0, Narrow klass range: 0x100000000
+Hey ma' look the GC!
+[0.180s][info][gc,heap,exit] Heap
+[0.180s][info][gc,heap,exit]  def new generation   total 78656K, used 9946K [0x0000000700000000, 0x0000000705550000, 0x0000000755550000) <2>
+[0.180s][info][gc,heap,exit]   eden space 69952K,  14% used [0x0000000700000000, 0x00000007009b6a70, 0x0000000704450000)
+[0.180s][info][gc,heap,exit]   from space 8704K,   0% used [0x0000000704450000, 0x0000000704450000, 0x0000000704cd0000)
+[0.180s][info][gc,heap,exit]   to   space 8704K,   0% used [0x0000000704cd0000, 0x0000000704cd0000, 0x0000000705550000)
+[0.180s][info][gc,heap,exit]  tenured generation   total 174784K, used 0K [0x0000000755550000, 0x0000000760000000, 0x0000000800000000)
+[0.180s][info][gc,heap,exit]    the space 174784K,   0% used [0x0000000755550000, 0x0000000755550000, 0x0000000755550200, 0x0000000760000000)
+[0.180s][info][gc,heap,exit]  Metaspace       used 774K, committed 960K, reserved 1056768K
+[0.180s][info][gc,heap,exit]   class space    used 67K, committed 192K, reserved 1048576K
+----
+<1> make bold
+<2> make bold def new generation
+
+* `-XX:+UseParallelGC` to use the parallel GC, in this case adding `-verbose:gc -Xlog:gc*` as VM option as well produces the output in Listing 13-4.(Notice the parallel workers and the different heap structure.)
+
+*Listing 13-4.*  Showing Parallel GC details.
+[source, , linenums]
+----
+[0.016s][info][gc] Using Parallel <1>
+[0.018s][info][gc,init] Version: 17+35-2724 (release)
+[0.018s][info][gc,init] CPUs: 8 total, 8 available
+[0.018s][info][gc,init] Memory: 16384M
+[0.018s][info][gc,init] Large Page Support: Disabled
+[0.018s][info][gc,init] NUMA Support: Disabled
+[0.018s][info][gc,init] Compressed Oops: Enabled (Zero based)
+[0.018s][info][gc,init] Alignments: Space 512K, Generation 512K, Heap 2M
+[0.018s][info][gc,init] Heap Min Capacity: 8M
+[0.018s][info][gc,init] Heap Initial Capacity: 256M
+[0.018s][info][gc,init] Heap Max Capacity: 4G
+[0.018s][info][gc,init] Pre-touch: Disabled
+[0.018s][info][gc,init] Parallel Workers: 8
+[0.018s][info][gc,metaspace] CDS archive(s) mapped at: [0x0000000800000000-0x0000000800bd0000-0x0000000800bd0000), size 12386304, SharedBaseAddress: 0x0000000800000000, ArchiveRelocationMode: 0.
+[0.018s][info][gc,metaspace] Compressed class space mapped at: 0x0000000800c00000-0x0000000840c00000, reserved size: 1073741824
+[0.018s][info][gc,metaspace] Narrow klass base: 0x0000000800000000, Narrow klass shift: 0, Narrow klass range: 0x100000000
+Hey ma' look the GC!
+[0.187s][info][gc,heap,exit] Heap
+[0.187s][info][gc,heap,exit]  PSYoungGen      total 76288K, used 9337K [0x00000007aab00000, 0x00000007b0000000, 0x0000000800000000) <2>
+[0.187s][info][gc,heap,exit]   eden space 65536K, 14% used [0x00000007aab00000,0x00000007ab41e680,0x00000007aeb00000)
+[0.187s][info][gc,heap,exit]   from space 10752K, 0% used [0x00000007af580000,0x00000007af580000,0x00000007b0000000)
+[0.187s][info][gc,heap,exit]   to   space 10752K, 0% used [0x00000007aeb00000,0x00000007aeb00000,0x00000007af580000)
+[0.187s][info][gc,heap,exit]  ParOldGen       total 175104K, used 0K [0x0000000700000000, 0x000000070ab00000, 0x00000007aab00000) <3>
+[0.187s][info][gc,heap,exit]   object space 175104K, 0% used [0x0000000700000000,0x0000000700000000,0x000000070ab00000)
+[0.187s][info][gc,heap,exit]  Metaspace       used 746K, committed 896K, reserved 1056768K
+[0.187s][info][gc,heap,exit]   class space    used 65K, committed 128K, reserved 1048576K
+----
+<1> make bold
+<2> make bold PSYoungGen
+<3> make bold ParOldGen
+
+* `-XX:+UseG1GC`, the default garbage collector, already covered this one.
+* `-XX:+UseShenandoahGC` to use the Shenandoah GC. Although the flag exists, Oracle has chosen not to build Shenandoah, it is however available in various OpenJDK builds listed on the Shenandoah official documentation: https://wiki.openjdk.java.net/display/shenandoah/Main#Main-JDKSupport.
+* `-XX:+UseZGC` to use the ZGC, in this case adding `-verbose:gc -Xlog:gc*` as VM option as well produces the output in Listing 13-5.(Notice the GC and Runtime workers and the different heap structure.)
+
+*Listing 13-5.*  Showing ZGC details.
+[source, , linenums]
+----
+[0.031s][info][gc,init] Initializing The Z Garbage Collector <1>
+[0.031s][info][gc,init] Version: 17+35-2724 (release)
+[0.031s][info][gc,init] NUMA Support: Disabled
+[0.031s][info][gc,init] CPUs: 8 total, 8 available
+[0.031s][info][gc,init] Memory: 16384M
+[0.031s][info][gc,init] Large Page Support: Disabled
+[0.031s][info][gc,init] GC Workers: 2 (dynamic) <2>
+[0.031s][info][gc,init] Address Space Type: Contiguous/Unrestricted/Complete
+[0.031s][info][gc,init] Address Space Size: 65536M x 3 = 196608M
+[0.032s][info][gc,init] Min Capacity: 8M
+[0.032s][info][gc,init] Initial Capacity: 256M
+[0.032s][info][gc,init] Max Capacity: 4096M
+[0.032s][info][gc,init] Medium Page Size: 32M
+[0.032s][info][gc,init] Pre-touch: Disabled
+[0.032s][info][gc,init] Uncommit: Enabled
+[0.032s][info][gc,init] Uncommit Delay: 300s
+[0.032s][info][gc,init] Runtime Workers: 5 <3>
+[0.032s][info][gc     ] Using The Z Garbage Collector <4>
+[0.033s][info][gc,metaspace] CDS archive(s) mapped at: [0x0000000800000000-0x0000000800ba4000-0x0000000800ba4000), size 12206080, SharedBaseAddress: 0x0000000800000000, ArchiveRelocationMode: 0.
+[0.033s][info][gc,metaspace] Compressed class space mapped at: 0x0000000800c00000-0x0000000840c00000, reserved size: 1073741824
+[0.033s][info][gc,metaspace] Narrow klass base: 0x0000000800000000, Narrow klass shift: 0, Narrow klass range: 0x100000000
+Hey ma' look the GC!
+[0.283s][info][gc,heap,exit] Heap
+[0.283s][info][gc,heap,exit]  ZHeap           used 10M, capacity 256M, max capacity 4096M <5>
+[0.283s][info][gc,heap,exit]  Metaspace       used 754K, committed 896K, reserved 1056768K
+[0.283s][info][gc,heap,exit]   class space    used 66K, committed 128K, reserved 1048576K
+----
+<1> make bold
+<2> make bold
+<3> make bold
+<4> make bold
+<5> make bold ZHeap
+
+* `-XX:+UseEpsilonGC`, the no-op garbage collector. If in the console you will see a message asking you to also add the `-XX:+UnlockExperimentalVMOptions` before the option to enable the Epsilon garbage collector do so. This VM option is needed to unlock experimental features and at the moment when this book
+is being written this garbage collector is an experimental feature. Adding `-verbose:gc -Xlog:gc*` as VM option as well produces the output in Listing 13-6.(Notice the lack of any workers and the TLAB options.)
+
+*Listing 13-6.*  Showing Epsilon GC details.
+[source, , linenums]
+----
+[0.012s][info][gc] Using Epsilon <1>
+[0.012s][info][gc,init] Version: 17+35-2724 (release)
+[0.012s][info][gc,init] CPUs: 8 total, 8 available
+[0.012s][info][gc,init] Memory: 16384M
+[0.012s][info][gc,init] Large Page Support: Disabled
+[0.012s][info][gc,init] NUMA Support: Disabled
+[0.012s][info][gc,init] Compressed Oops: Enabled (Zero based)
+[0.012s][info][gc,init] Heap Min Capacity: 6656K
+[0.012s][info][gc,init] Heap Initial Capacity: 256M
+[0.012s][info][gc,init] Heap Max Capacity: 4G
+[0.012s][info][gc,init] Pre-touch: Disabled
+[0.012s][warning][gc,init] Consider setting -Xms equal to -Xmx to avoid resizing hiccups
+[0.012s][warning][gc,init] Consider enabling -XX:+AlwaysPreTouch to avoid memory commit hiccups
+[0.012s][info   ][gc,init] TLAB Size Max: 4M <2>
+[0.012s][info   ][gc,init] TLAB Size Elasticity: 1.10x
+[0.012s][info   ][gc,init] TLAB Size Decay Time: 1000ms
+[0.013s][info   ][gc,metaspace] CDS archive(s) mapped at: [0x0000000800000000-0x0000000800bd0000-0x0000000800bd0000), size 12386304, SharedBaseAddress: 0x0000000800000000, ArchiveRelocationMode: 0.
+[0.013s][info   ][gc,metaspace] Compressed class space mapped at: 0x0000000800c00000-0x0000000840c00000, reserved size: 1073741824
+[0.013s][info   ][gc,metaspace] Narrow klass base: 0x0000000800000000, Narrow klass shift: 0, Narrow klass range: 0x100000000
+Hey ma' look the GC!
+[0.179s][info   ][gc,heap,exit] Heap
+[0.179s][info   ][gc,heap,exit] Epsilon Heap
+[0.179s][info   ][gc,heap,exit] Allocation space:
+[0.179s][info   ][gc,heap,exit]  space 262144K,   1% used [0x0000000700000000, 0x00000007003364a0, 0x0000000710000000)
+[0.180s][info   ][gc,heap,exit]  Metaspace       used 751K, committed 896K, reserved 1056768K
+[0.180s][info   ][gc,heap,exit]   class space    used 65K, committed 128K, reserved 1048576K
+[0.180s][info   ][gc          ] Heap: 4096M reserved, 256M (6.25%) committed, 3289K (0.08%) used
+[0.180s][info   ][gc,metaspace] Metaspace: 1032M reserved, 896K (0.08%) committed, 752K (0.07%) used
+----
+
+As you can see the data printed for these garbage collectors has common elements, such as the size of heap, which will always be 256M at the start of the application and has a maximum size of 4GB on my system. The eden and the young generation differs between them as well, the G1 using just 4096K for the young generation, when the CMS requires 78656K. (a lot more)
+
+The most interesting here is the Epislon garbage collector, because as expected it does not have a heap split into generation areas, as this type of garbage collector does not perform garbage collection at all. The *TLAB* is an acronym for *Thread Local Allocation Buffer* which is a memory area where objects are stored. Only bigger objects are stored outside of TLABs. The TLABs are dynamically resized during the execution for each thread individually. So, if a
+thread allocates very much, the new TLABs that it gets from the heap will increase in size. The minimum size of a TLAB can be controlled using the VM `-XX:MinTLABSize` option.
+
+For the small empty class that we ran with the previous VM options, this output is not really relevant, but you can play with these options when running the code from the next sections, because that is when the statistics printed here have some relevance. +
+Also, there is a VM option named `-XX:+PrintCommandLineFlags` that can be used when a class is run to depict configurations of the garbage collector, as the number of threads it makes use of, heap size and so on. These options are shown in Listing 13-7.
+
+*Listing 13-7.*  G1GC VM Options.
+[source, , linenums]
+----
+-XX:ConcGCThreads=2 <1>
+-XX:G1ConcRefinementThreads=8 <2>
+-XX:GCDrainStackTargetSize=64
+-XX:InitialHeapSize=268435456 <3>
+-XX:MarkStackSize=4194304
+-XX:MaxHeapSize=4294967296 <4>
+-XX:MinHeapSize=6815736
+-XX:+PrintCommandLineFlags
+-XX:ReservedCodeCacheSize=251658240
+-XX:+SegmentedCodeCache
+-XX:+UseCompressedClassPointers
+-XX:+UseCompressedOops
+-XX:+UseG1GC <5>
+----
+Most of these VM options have obvious names that allow a developer to infer himself or herself what they are used for, for those that do not, there is such a thing as the official documentation from Oracle. If you ever need to dissect the Oracle memory management this article is very good for this: https://www.oracle.com/java/technologies/javase/javase-core-technologies-apis.html.
+
+== Working with GC From the Code
+
+For most applications garbage collection is not something a developer must really take into account. the JVM starts a GC thread from time to time, that does its job usually without hindering the execution of the application. For developers who want to have more than Java basic skills, understanding how the Java garbage collection works and how can it be tuned is a must. The first thing a developer must accept about Java garbage collection, is that it cannot actually be controlled at runtime. As you will see in the next section there is a way to suggest the JVM that some memory cleaning is necessary, but there is no guarantee that a memory cleaning will actually be performed. The only thing that can be done from the code specifying some code to be run when an object is discarded.
+
+=== Using the `finalize()` method
+
+At the beginning of this book it was mentioned that every Java class is automatically a subclass of the JDK `java.lang.Object` class. This class is at the root of the JDK hierarchy and is the root of all classes in an application. It provides quite a few useful methods, that can be extended or overwritten to implement behaviour specific to the subclass. The `equals()`, `hashcode()` and `toString()` have already been mentioned. The `finalize()` method, was deprecated in Java 9, but it was not yet removed from the JDK in the interest of backwards compatibility. The finalization mechanism is somewhat problematic. Finalization can lead to performance issues, deadlocks, and hangs. Errors in finalizers can lead to resource leaks, also there is no way to cancel finalization if it is no longer necessary.
+
+Since some developers might end up working with Java projects using earlier versions of the JDK, it is good to know that this method exists, just in case you might ever need it, or just to know where to look for weird bugs.
+
+This method is called by the Garbage Collector when there are no longer any references to that object in the code. Before we move forward take a look at the code in Listing 13-8.
+
+*Listing 13-8.*  Class generating an infinite number of `Singer` instances.
+[source, Java, linenums]
+----
+package com.apress.bgn.thirteen;
+
+import com.apress.bgn.thirteen.util.NameGenerator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.time.LocalDate;
+import java.util.Random;
+
+public class InfiniteSingerGenerator {
+    private static final Logger log = LoggerFactory.getLogger(InfiniteSingerGenerator.class);
+    private static NameGenerator nameGenerator = new NameGenerator();
+    private static final Random random = new Random();
+
+    public static void main(String... args) {
+        while (true) {
+            genSinger();
+        }
+    }
+
+    private static void genSinger() {
+        Singer s = new Singer(nameGenerator.genName(), random.nextDouble(), LocalDate.now());
+        log.info("JVM created: {}", s.getName());
+    }
+}
+----
+
+The action performed by the previous code should be obvious even without knowing how the `NameGenerator` or the `Singer` class look like. The main method calls the `genSinger()` method in an infinite loop. This means that an infinite `Singer` instances are created. So, what happens? Will the code run? For how long? If you were able to reply these questions in your mind, my work here is complete, you can stop reading the book now. :)
+
+In *Chapter 5* there were some figures representing the memory contents for a small program. Figure 13-4 represents how the Java heap and stack memory might look during the execution of the previous program.
+
+image:Figure_13-04.png[Scanner, 600]
+
+*Figure 13-4.* _Java stack and heap memory during execution of the `InfiniteSingerGenerator` class._
+
+Of course only one `genSinger()` call was represented and only one `Singer` instance for obvious reasons. As you can see when the `main(..)` method is called, references to the static instances are created, that will be relevant to the program until the end of its execution. Then, `genSinger()` methods are called. Each of these methods has its own stack where it saves references to the objects created within the context of that method, in this case the `Singer` instance. This reference is used just to print the name of the Singer instance that was created in the body of this method. then the method exists, without returning the reference. This means that the instance that was created, is no longer necessary, as it was created to be used only in the context of this method. When the execution of the`genSinger()` method ends, the reference to the `Singer` is discarded from the stack. The `Singer` instance still exists, in the heap memory, but can no longer be accessed from the program, thus it is no longer necessary to it. It now just keeps a memory block occupied with its own contents, its references to other instances, in this case, a `String`, a `Double` and a `LocalDate`. +
+Considering that the `genString()` is called an infinite number of times(in the figure we represented this by the `(*n)`, more `Singer` instances will be created and they will keep the memory occupied and the program will be unable at some point to create others, because there will be no more memory available.
+
+This is where the Garbage Collector comes into the picture. The `Singer` instances, that are no longer being referenced from the program, and thus unreachable, are considered garbage, (now you know where the name is coming from) they are no longer necessary and the memory can be safely cleaned up. The Garbage Collector, is a cleanup thread that runs in parallel with the main execution thread and from time to time, starts deleting the unreferenced objects in the heap memory. And because the `finalize()` method is still available for use, we will overwrite it for the `Singer` type to print a log message, so we can see in our console directly when the Garbage Collector is destroying an instance, because before that will call the `finalize()` method. The code snippet in Listing 13-9, depicts our `Singer` instance.
+
+*Listing 13-9.*  The `Singer` class with the overriden `finalize()` method.
+[source, Java, linenums]
+----
+package com.apress.bgn.thirteen;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.time.LocalDate;
+import java.util.Objects;
+
+public class Singer {
+    private static final Logger log = LoggerFactory.getLogger(Singer.class);
+    private static final long serialVersionUID = 42L;
+    private final long birthtime;
+
+    private String name;
+
+    private Double rating;
+
+    private LocalDate birthDate;
+
+    public Singer(String name, Double rating, LocalDate birthDate) {
+        this.name = name;
+        this.rating = rating;
+        this.birthDate = birthDate;
+        this.birthtime = System.nanoTime(); // <1>
+    }
+
+    // some code omittted
+
+    @Override
+    protected void finalize() throws Throwable { // <2>
+        try {
+            long deathtime = System.nanoTime();
+            long lifespan = (deathtime - birthtime) / 1_000_000_000;
+            log.info("GC Destroyed: {} after {} seconds", name, lifespan);
+
+        } finally {
+            super.finalize(); // <3>
+        }
+    }
+}
+----
+<1> make bold
+<2> make bold
+<3> make bold
+
+The field `birthtime` was added just to be able to calculate the time it passes between when the constructor for an instance is called and the time the Garbage Collector calls the `finalize()` method. As the time is counted in nanoseconds, we are dividing the difference by pow(10, 9) to get the time in seconds.
+
+The code sample used in this section gives the garbage collector a lot of work to do, as every `Singer` instance being created is being used very little before being discarded. If you run the code you will see a lot of log messages in the console, first a lot of messages about objects being created, but if you wait a little messages about objects being discarded will appear as well. All output is directed to a file, because the IntelliJ IDEA console is based on a buffer that resets from time to time to prevent the editor from crashing. You will have to stop the program manually, because the while(true) never ends, because its condition will never evaluate to false. After you stopped the program you will notice a log file at the following location: `/chapter13/out/gc.log`. If you don’t, modify the IntelliJ IDEA launcher for this class and add the following VM option +
+`-Dlogback.configurationFile=chapter13/src/main/resources/logback.xml` and run it again. +
+The `gc.log` contents should look a lot like the snippet depicted in Listing 13-10:
+
+*Listing 13-10.*  The `gc.log` file showing the `finalize()` method in class `Singer` beign called.
+[source, , linenums]
+----
+INFO  c.a.b.t.InfiniteSingerGenerator - JVM created: Acnefqlspvwekzq
+INFO  c.a.b.t.InfiniteSingerGenerator - JVM created: izyfkluhimlpkt
+INFO  c.a.b.t.InfiniteSingerGenerator - JVM created: Tcyrpvgyfbpobym
+INFO  c.a.b.t.InfiniteSingerGenerator - JVM created: Akmvyeazowdavpy
+INFO  c.a.b.t.Singer - GC Destroyed: Kjidllzezjjdjge after 1 seconds
+INFO  c.a.b.t.InfiniteSingerGenerator - JVM created: Llsghambpgetl c
+INFO  c.a.b.t.Singer - GC Destroyed: Bffmcezvrzflhlh after 1 seconds
+INFO  c.a.b.t.InfiniteSingerGenerator - JVM created: Pg vjmfwzhujzv
+INFO  c.a.b.t.Singer - GC Destroyed: wrlaqutybuzvsj after 1 seconds
+INFO  c.a.b.t.InfiniteSingerGenerator - JVM created: Kdzlsyiteskleka
+INFO  c.a.b.t.Singer - GC Destroyed: Lqzdgeqqguitbgg after 1 seconds
+INFO  c.a.b.t.Singer - GC Destroyed: Ddpzqlbiryelzvr after 1 seconds
+INFO  c.a.b.t.Singer - GC Destroyed: Ozkzfubi  vpmj  after 1 seconds
+INFO  c.a.b.t.InfiniteSingerGenerator - JVM created: Uegz isigjcrlfj
+...
+----
+
+When you have the file, you can open it and start analysing its contents, but because IntelliJ might not open such a big file, try to open it with a specialised text editor like Notepad++ or Sublime. Or, if you use a Unix/Linux operating system, just open your console and use the grep command like this:
+```
+grep -a 'seconds' gc.log
+```
+This will display all log entries printed when the `finalize() `method is called. Then, you can select the name of an instance can do something like this:
+```
+$ grep -a 'Lybhpococssuoz' gc.log
+INFO c.a.b.c.Main - JVM created: Lybhpococssuoz
+INFO c.a.b.c.Singer - GC Destroyed: Lybhpococssuoz after 7 seconds
+```
+
+As you can see, the time it takes for a `Singer` instance to be deleted from the heap varies, and this is because the GC is called randomly, the developer has no control over it. There is a way to explicitly request garbage collection to be done, well two ways. You can call:
+`System.gc()` or +
+`Runtime.getRuntime().gc()`.
+
+This doesn’t mean that the GC will immediately start cleaning up the memory though, it is more like a suggestion to the JVM that it should make an effort to recycle unused objects and reclaim unused memory, because it is being needed.
+
+Now, back to the `finalize()` method. It was mentioned that it was marked as deprecated in Java 9. This method is meant to be overridden by classes that handle resources that are stored outside of the heap. The obvious example here are the I/O handling classes, used to read resources as files or URLs and databases. The `finalize()` would be called by the JVM when an object can no longer be accessed by any alive thread of the running application, to make sure that those resources were released and available for other external and unrelated programs to use.
+
+INFO: In older versions of Apache Tomcat (a Java based web server), on Windows there was a bug related to release of resources. When the server would crash or would be stopped, it couldn’t be started again because some of its log files handlers were not released properly, and the new server instance could not get access to them to start writing the new log entries.
+
+With the introduction of the `java.lang. AutoCloseable` interface in JDK 1.7, the `finalize()` method became less and less used. A few problems with this method were mentioned previously, but the following list gives more context:
+
+* Another problem with this method is that the JVM cannot guarantee which thread will call this method for any given object. So any thread that has access to it can call it, and we might end up with resources being released while the object is still needed.
+* What happens if the custom implementation is not correct, throws exceptions or does not release resources properly?
+* The `finalize()` method should be called only once, by the JVM, but this cannot be guaranteed.
+* Another downside is that `finalize()` calls, are not automatically chained, so an implementation of a `finalize()` method, must always explicitly call the `finalize()` method of the superclass.
+* Another one that was previously mentioned: once a `finalize()` was called, there is no way to stop the method from executing or undo its effect, so you are basically left with a reference to an object that no longer exists.
+
+As you probably figured out by now, there is a lot of freedom given to the developer when it comes to implementing this method, and this means there is a lot of room for errors to happen. +
+This is why the finalization mechanism in Java is flawed and was deprecated in JDK 9 to discourage its use. Improper
+`finalize()` implementations could lead to:
+
+* memory leaks (memory contents are not discarded)
+* deadlocks (resource is blocked by two processes)
+* hangs(process is in a waiting state it cannot go out of)
+
+In order to help with memory management the `java.lang.ref.Cleaner` class was introduced in Java 9. Before getting into that, I must show you how to check out that status of your memory programatically.
+
+== Heap Memory Statistics
+
+The `Runtime` class is quite useful when trying to interact with the internals of the JVM while a program is running. As previously mentioned in this chapter, its `gc()` method can be called to suggest to the JVM that the memory should be cleaned and a few chapters ago we have used methods in this class to start processes from the Java code. There are three methods in this class are useful to see the status of the memory assigned to a Java program:
+
+* `runtime.maxMemory()` returns the maximum amount of memory the JVM will attempt to use for its heap, in case of need. The value returned by this method varies from machine to machine and is being set implicitly to a quarter of the total existing RAM memory on the machine, unless is set it is set explicitly by using the following JVM option `-Xmx` followed by the amount of memory, eg: `-Xmx8G` will allow the JVM to use a
+maximum of 8 GB of memory.
+* `runtime.totalMemory()` returns the total amount of memory of the JVM. The value returned by this method varies from machine to machine too and is implementation-dependent, unless explicitly set by using the following JVM option `-Xms` followed by the amount of memory. eg: `-Xms1G` will tell the JVM that is the initial size of its heap memory should be 1 GB of memory.
+* `runtime.freeMemory()` returns an approximation of the amount of free memory for the Java Virtual Machine. Using the `runtime.totalMemory()` and the `runtime.freeMemory()` methods we can write some code to check how much of our memory is occupied at various times during the execution of the program. For this a class named `MemAudit` is created that will use the current logger to print memory values. The implementation of this class is shown in Listing 13-11.
+
+*Listing 13-11.*  The `MemAudit` class shown memory statistics during the execution of a Java application.
+[source, Java, linenums]
+----
+package com.apress.bgn.thirteen.util;
+
+import org.slf4j.Logger;
+
+public class MemAudit {
+    private static final long MEGABYTE = 1024L * 1024L;
+    private static final Runtime runtime = Runtime.getRuntime();
+
+    public static void printBusyMemory(Logger log) {
+        long memory = runtime.totalMemory() - runtime.freeMemory();
+        log.info("Occupied memory: {} MB", (memory / MEGABYTE));
+    }
+    public static void printTotalMemory(Logger log) {
+        log.info("Total Program memory: {} MB", (runtime.totalMemory()/MEGABYTE));
+        log.info("Max Program memory: {} MB", (runtime.maxMemory()/MEGABYTE));
+    }
+}
+----
+The methods of this class will be called during the execution of our program as shown in Listing 13-12.
+
+*Listing 13-12.*  The `MemAuditDemo` class using the class in Listing 13-11 to print memory statistics in the console.
+[source, Java, linenums]
+----
+package com.apress.bgn.thirteen;
+
+import com.apress.bgn.thirteen.util.NameGenerator;
+
+// some imports omitted
+import static com.apress.bgn.thirteen.MemAudit.*;
+
+public class MemAuditDemo {
+    private static final Logger log = LoggerFactory.getLogger(MemAuditDemo.class);
+    private static NameGenerator nameGenerator = new NameGenerator();
+    private static final Random random = new Random();
+
+    public static void main(String... args) {
+        printTotalMemory(log);
+        int count =0;
+        while (true) {
+            genSinger();
+            count++;
+            if (count % 1000 == 0) {
+                printBusyMemory(log);
+            }
+        }
+    }
+    private static void genSinger() {
+        Singer s = new Singer(nameGenerator.genName(), random.nextDouble(), LocalDate.now());
+        log.info("JVM created: {}", s.getName());
+    }
+}
+----
+Now, after we delete the old log file, we should run this class, and leave it running for a while . Since it will be impossible again to see the output, this command  +
+```
+grep -a 'memory' gc.log
+
+```
+is useful to extract all lines containing the 'memory' word, and the result should look quite similar to one in Listing 13-13.
+
+*Listing 13-13.*  Memory statistics printed by methods in the `MemAudit` class during Java application execution.
+[source, , linenums]
+----
+$  grep -a 'memory' gc.log
+INFO  c.a.b.t.MemAuditDemo - Total Program memory: 260 MB <1>
+INFO  c.a.b.t.MemAuditDemo - Max Program memory: 4096 MB <2>
+INFO  c.a.b.t.MemAuditDemo - Occupied memory: 21 MB <3>
+INFO  c.a.b.t.MemAuditDemo - Occupied memory: 7 MB <4>
+INFO  c.a.b.t.MemAuditDemo - Occupied memory: 12 MB
+...
+INFO  c.a.b.t.MemAuditDemo - Occupied memory: 98 MB
+INFO  c.a.b.t.MemAuditDemo - Occupied memory: 104 MB
+...
+----
+<1> make bold
+<2> make bold
+<3> make bold
+<4> make bold
+
+The max memory is 4096MB, which means my machine has a total of 16 GB of RAM, and the occupied memory is very little, not even close to the initial 260MB the JVM is given to use. If we want to see real memory being occupied we can modify the `genSinger()` method to return the created references and add them to a list. Since the `Singer` instances are referenced in the main class the memory is no longer emptied. The modifications mentioned previously are shown in Listing 13-14.
+
+*Listing 13-14.*  Saving the `Singer` instances to a list to avoid them being collected by the GC and the memory cleared.
+[source, Java, linenums]
+----
+import com.apress.bgn.thirteen.util.NameGenerator;
+// some import statements omitted
+import java.util.ArrayList;
+import java.util.List;
+import static com.apress.bgn.thirteen.util.MemAudit.*;
+
+public class MemoryConsumptionDemo {
+    private static final Logger log = LoggerFactory.getLogger(MemoryConsumptionDemo.class);
+    private static NameGenerator nameGenerator = new NameGenerator();
+    private static final Random random = new Random();
+
+    public static void main(String... args) {
+        printTotalMemory(log);
+        List<Singer> singers = new ArrayList<>(); // <1>
+        for (int i = 0; i < 1_000_000; ++i) {
+            singers.add(genSinger()); // <2>
+            if (i % 1000 == 0) {
+                printBusyMemory(log);
+            }
+        }
+    }
+    private static Singer genSinger() {
+        Singer s = new Singer(nameGenerator.genName(), random.nextDouble(), LocalDate.now());
+        log.info("JVM created: {}", s.getName());
+        return s;
+    }
+}
+----
+<1> make bold
+<2> make bold
+
+After running the previous program we can actually the memory being used gradually increasing. A look in the log filtered magically by grep will show us that the program keeps the memory occupied, until its end, since the references now are saved in to the `List<Singer>` instance, as shown in Listing 13-15.
+
+*Listing 13-15.*  Memory statistics printed by methods in the `MemAudit` class during a Java application execution, where instance are saved to a `List<Singer>`.
+[source, , linenums]
+----
+$ grep -a ’memory’ gc.log
+INFO  c.a.b.t.MemoryConsumptionDemo - Total Program memory: 260 MB
+INFO  c.a.b.t.MemoryConsumptionDemo - Max Program memory: 4096 MB
+INFO  c.a.b.t.MemoryConsumptionDemo - Occupied memory: 14 MB
+INFO  c.a.b.t.MemoryConsumptionDemo - Occupied memory: 17 MB
+INFO  c.a.b.t.MemoryConsumptionDemo - Occupied memory: 19 MB
+INFO  c.a.b.t.MemoryConsumptionDemo - Occupied memory: 22 MB
+...
+INFO  c.a.b.t.MemoryConsumptionDemo - Occupied memory: 99 MB
+INFO  c.a.b.t.MemoryConsumptionDemo - Occupied memory: 101 MB
+INFO  c.a.b.t.MemoryConsumptionDemo - Occupied memory: 104 MB
+...
+INFO  c.a.b.t.MemoryConsumptionDemo - Occupied memory: 474 MB
+INFO  c.a.b.t.MemoryConsumptionDemo - Occupied memory: 477 MB
+----
+And as we print the occupied memory every 1000 steps, we can draw the conclusion that 1000 `Singer` instances occupy approximatively 2 MB. The code above no longer uses an infinite loop to generate instances, if it would do that, at the point the program will abruptly crash throwing the following exception:
+```
+Exception in thread "main" java.lang.OutOfMemoryError: Java heap space
+    at chapter.thirteen/com.apress.bgn.thirteen.MemoryConsumptionDemo
+        .genSinger(MemoryConsumptionDemo.java:64)
+    at chapter.thirteen/com.apress.bgn.thirteen.MemoryConsumptionDemo
+        .main(MemoryConsumptionDemo.java:55)
+```
+Remember the value returned by the `runtime.maxMemory()`? On my machine, it was 4096MB. If I look in the console, right before the exception depicted above, here is what I see:
+```
+INFO c.a.b.c.MemoryConsumptionDemo - Occupied memory: 4094 MB
+INFO c.a.b.c.MemoryConsumptionDemo - Occupied memory: 4094 MB
+INFO c.a.b.c.MemoryConsumptionDemo - Occupied memory: 4095 MB
+INFO c.a.b.c.MemoryConsumptionDemo - Occupied memory: 4095 MB
+INFO c.a.b.c.MemoryConsumptionDemo - Occupied memory: 4095 MB
+```
+
+So the JVM was struggling to create another Singer instance, but there was no more memory left. The last value printed before the exception was `4095MB`, which is 1 MB less than `4096MB` the maximum amount of memory that the JVM was allowed to use. So the poor JVM crashed because there was no more heap memory available. If a program ever ends like that, the problem is always in the design of the solution. Also the values for total and maximum memory for the JVM can influence the behaviour of the GC as well. The `-Xms` and `-Xmx` introduced previously are quite important as they decide the initial and the maximum size of the heap memory. Configured properly they can increase performance, but when unsuitable values they have the adverse effect. For example, never set an initial size for the heap too small, because if there is not enough space to fit all objects created by the application the JVM has to allocate more memory, rebuilding the heap basically. So if this happens a few times during the application run, the overall time consumption will be affected. The maximum size for the heap is very important, allocate too
+little the application will crash, allocating too much, might hinder other programming from running. Deciding these values is usually done through repeated experiments and starting with JDK 11, the new Epsilon garbage collector comes quite in handy for this purpose. +
+
+If you want to learn more about GC tunning, as usually the best documentation is the official one https://docs.oracle.com/javase/10/gctuning/toc.htm.
+
+So, now that you know what to expect from the GC, let’s see other methods of customising its behaviour so problems
+are avoided.
+
+== Using Cleaner
+
+Because of the necessity to ensure backwards compatibility is not clear when the `finalize()` method is to be taken out of the JDK. If needed classes can be developed to implement `java.lang.AutoCloseable` and provide an implementation for the `close()` method and make sure you use your objects in a `try-with-resources` statement. +
+If you want to avoid implementing the interface there is another way, use a `java.lang.ref.Cleaner` object. This class can be instantiated and
+objects can be registered to it together with an action to perform when the object is being discarded by the garbage collector. Using a `Cleaner` instance the previous code can be written like depicted in code Listing 13-16:
+
+*Listing 13-16.*  Using a `Cleaner` instance.
+[source, Java, linenums]
+----
+package com.apress.bgn.thirteen.cleaner;
+// some import statements omitted
+import java.lang.ref.Cleaner;
+
+public class CleanerDemo {
+    private static final Logger log = LoggerFactory.getLogger(CleanerDemo.class);
+    public static final Cleaner cleaner = Cleaner.create();
+    private static NameGenerator nameGenerator = new NameGenerator();
+
+    public static void main(String... args) {
+        printTotalMemory(log);
+        int count = 0;
+        for (int i = 0; i < 100_000; ++i) {
+            genActor();
+            count++;
+            if (count % 1000 == 0) {
+                printBusyMemory(log);
+                System.gc();
+            }
+        }
+
+        //filling memory with arrays of String to force GC to clean up Actor objects
+        for (int i = 1; i <= 10_000; i++) {
+            String[] s = new String[10_000];
+            try {
+                Thread.sleep(1);
+            } catch (InterruptedException e) {
+            }
+        }
+
+    }
+
+    private static Cleaner.Cleanable genActor() {
+        Actor a = new Actor(nameGenerator.genName(), LocalDate.now());
+        log.info("JVM created: {}", a.getName());
+        Cleaner.Cleanable handle = cleaner.register(a, new ActorRunnable(a.getName(), log));
+        return handle;
+    }
+
+    static class ActorRunnable implements Runnable {
+        private final String actorName;
+        private final Logger log;
+
+        public ActorRunnable(String actorName, Logger log) {
+            this.actorName = actorName;
+            this.log = log;
+        }
+
+        @Override
+        public void run() {
+            log.info("GC Destroyed: {} ", actorName);
+        }
+    }
+}
+----
+
+Because we wanted to make it easier for you to browse the code, as all these sources are part of the same project, we are using here a class modelling an `Actor` instead of a `Singer`, but no worries, the implementation is quite similar. +
+The `Cleaner` instance has a method named `register(..)` that is called to register the action to be performed when the object is cleaned. The action to be performed is specified as a `Runnable` instance, and the decision to create a class by implementing it, `ActorRunnable` in this example, was taken so we could save the name of the object to be destroyed into a field, without actually keeping a reference to the object to be destroyed, otherwise the `Cleaner.Cleanable` handle would not be used by the GC during the execution of the program, as the object
+would appear as if it still had references to it. +
+The `cleaner.register(..)` method returns an instance of type `Cleaner.Cleanable` that can be used to explicitly perform the action, by calling the `clean()` method. If you run the code above, the printed log would look pretty similar to the one in Listing 13-17.
+
+*Listing 13-17.*  Log printed by an execution using a `Cleaner` instance to free up memory.
+[source, , linenums]
+----
+INFO  c.a.b.t.c.CleanerDemo - Total Program memory: 260 MB
+INFO  c.a.b.t.c.CleanerDemo - Max Program memory: 4096 MB
+INFO  c.a.b.t.c.CleanerDemo - JVM created: Nuyktryvtkewiwd
+INFO  c.a.b.t.c.CleanerDemo - JVM created: Brqivlsbvmteihz
+INFO  c.a.b.t.c.CleanerDemo - JVM created: Qzvopg ophjcyho
+...
+INFO  c.a.b.t.c.CleanerDemo - Occupied memory: 17 MB
+INFO  c.a.b.t.c.CleanerDemo - JVM created: Jrliwbjadztvwdm
+INFO  c.a.b.t.c.CleanerDemo - JVM created: Evdteelpzinfcfh
+INFO  c.a.b.t.c.CleanerDemo - JVM created: Hozfatszogfvzfz
+...
+INFO  c.a.b.t.c.CleanerDemo - GC Destroyed: Giqojswtuqzs s
+INFO  c.a.b.t.c.CleanerDemo - GC Destroyed: Lzdjorokvyzwdu
+INFO  c.a.b.t.c.CleanerDemo - JVM created: Igmzjiypo ttkzw
+INFO  c.a.b.t.c.CleanerDemo - JVM created: Ljmksqzhzzhuzwl
+INFO  c.a.b.t.c.CleanerDemo - GC Destroyed: Fny tnsffvyuisp
+INFO  c.a.b.t.c.CleanerDemo - GC Destroyed: Qzillviekynpkec
+...
+----
+
+So, the same result as using `finalize()` was obtained, but without implementing a deprecated method.
+
+TIP: As a good practice to take from here, if you are writing your application using Java 9+, avoid using `finalize()`, because this method is clearly on the path of being removed. Use `Cleaner` and you might have less of a hassle when upgrading the Java version your application is using.
+
+=== Preventing GC From Deleting An Object
+
+In the two previous sections we focused on objects that were eligible for garbage collection. In an application there are objects that should not be discarded while the program runs, because they are needed. The most obvious references in our classes that were discarded only at the end of the execution were the static fields, and they are final, so they cannot be reinitialised.
+```
+private static final Logger log = LoggerFactory.getLogger(CleanerDemo.class);
+public static final Cleaner cleaner = Cleaner.create();
+private static NameGenerator nameGenerator = new NameGenerator();
+private static final Random random = new Random();
+```
+
+The problem with these static values though, is that they occupy the memory. What if your application uses a big `Map<K,V>` that contains a dictionary, that is not even needed right when the application starts? To solve this, enter the `Singleton` design pattern. The `Singleton` pattern is a specific design of a class that ensured the class will only be instantiated *once* during the execution of the program. This is done by hiding the constructor (declare it private) , and declaring a static reference of the class type and a static method to return it. There is more than one way to write a class according to the `Singleton` pattern, but the most common way is depicted in code Listing 13-18.
+
+*Listing 13-18.*  `SingletonDictionary` class.
+[source, Java, linenums]
+----
+package com.apress.bgn.thirteen;
+// some import statements omitted
+import java.util.HashMap;
+import java.util.Map;
+
+public final class SingletonDictionary {
+    private static final Logger log = LoggerFactory.getLogger(SingletonDictionary.class);
+    private Map<String, String> dictionary = new HashMap<>();
+
+    private static SingletonDictionary instance = new SingletonDictionary(); // <1>
+
+    private SingletonDictionary() { // <2>
+        // init dictionary
+        log.info("Starting to create dictionary: {}", System.currentTimeMillis());
+        final NameGenerator keyGen = new NameGenerator(20);
+        final NameGenerator valGen = new NameGenerator(200);
+        for (int i = 0; i < 100_000; ++i) {
+            dictionary.put(keyGen.genName(), valGen.genName());
+        }
+        log.info("Done creating dictionary: {}", System.currentTimeMillis());
+    }
+
+    public synchronized static SingletonDictionary getInstance(){ // <3>
+        return instance;
+    }
+}
+----
+<1> make bold
+<2> make 'private' bold
+<3> make bold
+
+In the previous code we simulated a dictionary with 100.000 entries, all generated by a modified version of the `NameGenerator` class. Log messages were printed in its constructor to be really obvious when the instance is created. There are four things you have to remember about the `Singleton` pattern:
+
+* the constructor must be private, as it should not be called outside the class
+* the class must contain a static reference to an object of its type, that can be initialised in place by calling the private constructor
+* a method to retrieve this instance must be defined, so it has to be static
+* the method to retrieve the static instance also has to be synchronized so no two threads can call it at the same and gain access to the instance, because the core idea of the Singleton pattern is to allow the class to be instantiated only once during the duration of the execution of the program and ensure that no concurrent access is allowed, as it might lead to unexpected behaviour. Also, there is an implementation version that initialises the instance in the method that retrieves it, so concurrent access might actually lead to more than one instance being created.
+
+In a singleton class, a static reference to an instance is created and this static reference prevents the garbage collector from cleaning up this instance during the execution of the program. To test this, we'll write a main class, that declares a `Cleaner` instance and register a `Cleanable` for the `SingletonDictionary` instance. The main method will create a lot of `String` array to fill up the memory to try to convince the GC to delete the `SingletonDictionary` instance and we'll even set its own reference to it to `null`, as depicted in Listing 13-19.
+
+*Listing 13-19.*  `SingletonDictionaryDemo` class.
+[source, Java, linenums]
+----
+package com.apress.bgn.thirteen;
+// import statements omitted
+
+public class SingletonDictionaryDemo {
+    public static final Cleaner cleaner = Cleaner.create();
+    private static final Logger log = LoggerFactory.getLogger(SingletonDictionaryDemo.class);
+
+    public static void main(String... args) {
+        log.info("Testing SingletonDictionary...");
+        //filling memory with arrays of String to force GC
+        for (int i = 1; i <= 10_000; i++) {
+            String[] s = new String[10_000];
+            try {
+                Thread.sleep(1);
+            } catch (InterruptedException e) {
+            }
+        }
+        SingletonDictionary singletonDictionary = SingletonDictionary.getInstance();
+
+        cleaner.register(singletonDictionary, ()-> {
+            log.info("Cleaned up the dictionary!");
+        });
+        // we delete the reference
+        singletonDictionary = null; // <1>
+
+        //filling memory with arrays of String to force GC
+        for (int i = 1; i <= 10_000; i++) {
+            String[] s = new String[10_000];
+            try {
+                Thread.sleep(1);
+            } catch (InterruptedException e) {
+            }
+        }
+        log.info("DONE.");
+    }
+}
+----
+<1> make bold
+
+If we run the previous code and expect to see the "Cleaned up the dictionary!" message in the console,  we’re expecting in vain. That static reference in the `SingletonDictionary` will not allow GC to touch that object until the program ends. The static reference that we have in class `SingletonDictionary` is also called a strong reference, because it prevents the object from being discarded from memory.
+
+=== Using Weak References
+
+Obviously, if there are strong references, we should be able to use weak references as well, for objects that we actually want cleaned, right? Right.
+
+In Java there are three classes can be used to hold a reference to an object that will not protect that object from garbage collection. This is useful for objects that are too big, and it makes it inefficient to keep them in memory. With this kind of objects it is worth the cost of time consumed to be reinitialised, because keeping them in memory would slow done the overall performance of the application.
+
+The three classes are:
+
+* `java.lang.ref.SoftReference<T>`: objects referred by this type of references are cleared at the discretion of the garbage collector in response to memory demand. Soft references are most often used to implement memory-sensitive caches.
+* `java.lang.ref.WeakReference<T>`: objects referred by this type of references do not prevent their referents from being made finalizable, finalized, and then reclaimed. Weak references are most often used to implement canonicalizing mappings. Canonicalizing mapping refers to containers where weak references can be kept in and can be accessed by other objects, but their link to the container, does not prevent them from being collected.
+* `java.lang.ref.PhantomReference<T>`: objects referred by these type of references are enqueued after the collector determines that their referents may otherwise be reclaimed. Phantom references are most often used to schedule post-mortem cleanup actions.
+
+Our `SingletonDictionary` contains a `Map<K,V>` that is actually the big object stored in memory. This map can be wrapped in a `WeakReference` and we can write some logic, that when it is accessed, if it is not there, it should be reinitialised. Because we need to access the map, the implementation will change a little, aside from wrapping the `Map<K,V>` into a WeakReference. The new class, named `WeakDictionary` is depicted in code Listing 13-20.
+
+*Listing 13-20.*  `WeakDictionary` class.
+[source, Java, linenums]
+----
+package com.apress.bgn.thirteen.util;
+// other import statements omitted
+import java.lang.ref.WeakReference; // <1>
+
+public class WeakDictionary {
+    private static final Logger log = LoggerFactory.getLogger(WeakDictionary.class);
+    private static WeakDictionary instance = new WeakDictionary();
+    private static Cleaner cleaner;
+    private WeakReference<Map<Integer, String>> dictionary; // <2>
+
+    private WeakDictionary() {
+        cleaner = Cleaner.create();
+        dictionary = new WeakReference<>(initDictionary()); // <3>
+    }
+
+    public synchronized String getExplanationFor(Integer key) { // <4>
+        Map<Integer, String> dict = dictionary.get(); // <5>
+        if (dict == null) {
+            dict = initDictionary();
+            dictionary = new WeakReference<>(dict);
+            return dict.get(key);
+        } else {
+            return dict.get(key);
+        }
+    }
+
+    public WeakReference<Map<Integer, String>> getDictionary() {
+        return dictionary;
+    }
+
+    public synchronized static WeakDictionary getInstance() {
+        return instance;
+    }
+
+    private Map<Integer, String> initDictionary() {
+        final Map<Integer, String> dict = new HashMap<>();
+        log.info("Starting to create dictionary: {}", System.currentTimeMillis());
+        final NameGenerator valGen = new NameGenerator(200);
+        for (int i = 0; i < 100_000; ++i) {
+            dict.put(i, valGen.genName());
+        }
+        log.info("Done creating dictionary: {}", System.currentTimeMillis());
+        cleaner.register(dict, ()-> log.info("Cleaned up the dictionary!"));
+        return dict;
+    }
+}
+----
+<1> make bold
+<2> make bold
+<3> make bold
+<4> make 'synchronized' bold
+<5> make bold
+
+The `getExplanationFor(..)` is used to access the map and get the value corresponding a key. Before doing that however we have to check if the `Map<K,V>` is still there. This is done by calling the `get()` method on the dictionary reference which is of type `WeakReference<Map<Integer, String>>`. If the map was not collected by the GC, the key is extracted and returned, otherwise, the `Map<K,V>` is re-initialized and the weak reference is recreated. +
+The `Cleaner` instance was moved here as well, and registered a `Cleanable` for the `Map<K,V>`, so we can see the map being collected. So, how do we test this? In a similar way we tested `SingletonDictionary`. The `WeakDictionaryDemo` class is not that different. The code is depicted in Listing 13-21.
+
+*Listing 13-21.*  `WeakDictionaryDemo` class.
+[source, Java, linenums]
+----
+package com.apress.bgn.thirteen;
+
+import com.apress.bgn.thirteen.util.WeakDictionary;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+public class WeakDictionaryDemo {
+    private static final Logger log = LoggerFactory.getLogger(WeakDictionaryDemo.class);
+
+    public static void main(String... args) {
+        log.info("Testing WeakDictionaryDemo...");
+        //filling memory with arrays of String to force GC
+        for (int i = 1; i <= 10_000; i++) {
+            String[] s = new String[10_000];
+            try {
+                Thread.sleep(1);
+            } catch (InterruptedException e) {
+            }
+        }
+        WeakDictionary weakDictionary = WeakDictionary.getInstance();
+
+        //filling memory with arrays of String to force GC
+        for (int i = 1; i <= 10_000; i++) {
+            String[] s = new String[10_000];
+            try {
+                Thread.sleep(1);
+            } catch (InterruptedException e) {
+            }
+        }
+        log.info("Getting val for 3 =  {}", weakDictionary.getExplanationFor(3));
+        log.info("DONE.");
+    }
+}
+----
+
+So, after retrieving the `WeakDictionary` reference, a lot of `String` arrays are created to force GC to delete the map from memory. After that, we try to access the problematic map. Will it work?
+
+*Listing 13-22.*  `WeakDictionaryDemo` log.
+[source, , linenums]
+----
+INFO  c.a.b.t.WeakDictionaryDemo - Testing WeakDictionaryDemo...
+INFO  c.a.b.t.u.WeakDictionary - Starting to create dictionary: 1629635325234
+INFO  c.a.b.t.u.WeakDictionary - Done creating dictionary: 1629635325485
+INFO  c.a.b.t.u.WeakDictionary - Cleaned up the dictionary! // <1>
+INFO  c.a.b.t.u.WeakDictionary - Starting to create dictionary: 1629635337852
+INFO  c.a.b.t.u.WeakDictionary - Done creating dictionary: 1629635338093
+INFO  c.a.b.t.WeakDictionaryDemo - Getting val for 3 =  Lqcnaowqotkzlhckqepogpjdlgkjzenyzzoaunebjsc z nervebnbc yjjlmuqkjaemmbtjbqzstjsssrwubwvfeoqfynyisba zclhf   lep fdbsnm cagubzodfpkepblslpypjwsybmwgptyznuymzgcdhkfydtibkjwgojjalctkrloatluakwwzppledhzdi
+INFO  c.a.b.t.WeakDictionaryDemo - DONE.
+----
+<1> make bold
+
+The previous log proves this works, and not only that, we can see the map being discarded by GC and then reinitialized when needed. This is that power of soft references.
+
+Although the garbage collection process is un-deterministic, because it cannot be controlled much from the code, a Java program cannot tell it to start, pause or stop, but using the appropriate VM options we can control the resources it has and from the code using the proper implementation we can tell it what to collect or not and most times this is enoughfootnote:[If you want more details about GC this article is quite on point: https://www.oracle.com/technetwork/tutorials/tutorials-1876574.html].
+
+== Garbage Collections Exceptions and Causes
+
+It was mentioned before that if objects cannot be discarded from the memory, an exception of type `OutOfMemoryError` will be thrown. I’m not sure if you noticed, but `OutOfMemoryError` does not actually extend `java.lang.Exception`, so calling it an exception is wrong. The exception class hierarchy was mentioned in *Chapter 5* and if you remember, in that hierarchy there was a class named `java.lang.Error` that implements `java.lang.Throwable` and it was mentioned that when these types of objects where thrown by a program when there was a critical issue that the program cannot recover from. The full hierarchy of the `java.lang.OutOfMemoryError` is depicted below.
+```
+java.lang.Object
+    java.lang.Throwable
+        java.lang.Error
+            java.lang.VirtualMachineError
+                java.lang.OutOfMemoryError // <1>
+```
+<1> make bold
+
+`OutOfMemoryError` is actually one of those ugly things you do not want thrown when your program is running, because this means your program is actually no longer running and in this case. The reason why is not running is because it has no memory left to store new objects being created. +
+This error is being thrown by the JVM when anything goes wrong when doing memory management. Although, the most common cause is that the heap memory is depleted, there are other causes. When heap memory allocated to the JVM is depleted, the error has the following message:
+```
+Exception in thread "main" java.lang.OutOfMemoryError: Java heap space
+```
+But there is another message that you might see:
+```
+Exception in thread "main" java.lang.OutOfMemoryError: GC Overhead Limit Exceeded
+```
+This message is still related to the heap size. The error is thrown with this message when the data for the program barely fits the size of the heap, so the heap is almost full, which allows the GC to run, but because it cannot redeem any memory, the GC keeps running and it is actually hindering the normal execution of the application. This message is added to the error when the GC spends 98% of execution time and the application spends the other 2%.
+
+These two are the most common error messages you will see when GC cannot do its job properly for whatever reason. A complete list can be found here: https://docs.oracle.com/javase/8/docs/technotes/guides/troubleshoot/memleaks002.html, but since most GC issues relate to the heap size, G1GC mostly throws errors with the Java heap space messages.
+
+== Summary
+
+This section ends this book. When it comes to the Java ecosystem, there are a lot of book and tutorials on the internet. This book only scratched the surface, to give you a good starting point as a Java developer, and the whole team that worked on it hopes it satisfied your needs and raised your curiosity to fund out more. Just keep in mind that there is no panacea solution to make sure the memory is always managed right regardless of the application scope. If you get in trouble, experimentation is always a step of determining the right collector for your JVM.
+
+This chapter has covered the following topics:
+
+* what garbage collection is and the steps involved
+* how the heap memory is structured
+* how many types of garbage collectors there are in the Oracle HotSpot JVM and how can we switch between them
+* how to list all GC flags and use them as VM options
+* how to view a garbage collector configurations and statistics using VM options
+* how to view the garbage collection in action using finalize and `Cleaner`
+* how to stop the garbage collector from collecting important objects
+* how to create objects that are easily collected using soft references
